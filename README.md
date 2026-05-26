@@ -166,7 +166,9 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 | `gpt-5.4`                                            | codex     | GPT-5.4                                            |
 | `gpt-5.4-mini`                                       | codex     | GPT-5.4 Mini                                       |
 | `gpt-5.3-codex`                                      | codex     | GPT-5.3 (Codex variant)                            |
+| `gpt-5.3-codex-spark`                                | codex     | Ultra-fast coding model                            |
 | `gpt-5.2`                                            | codex     | GPT-5.2                                            |
+| `codex-auto-review`                                  | codex     | Review-oriented Codex model                        |
 | `cursor-claude-opus-4-7-medium`                      | cursor    | Claude Opus 4.7 routed through Cursor              |
 | `cursor-claude-sonnet-4-7-medium`                    | cursor    | Claude Sonnet 4.7 routed through Cursor            |
 | `cursor-default`                                     | cursor    | Cursor "Auto" model                                |
@@ -264,15 +266,26 @@ docker-compose up -d
 
 ## Use with Claude Code
 
-Set `ANTHROPIC_BASE_URL` to point Claude Code at auth2api:
+Set `ANTHROPIC_BASE_URL` to point Claude Code at auth2api. If you have both Anthropic and Codex accounts logged in, choose models by name: `claude-*` routes to Anthropic, while `gpt-5*`, `o*`, and `codex-*` route to Codex. This lets one Claude Code install move between Anthropic OAuth and OpenAI Codex OAuth without changing tools.
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8317 \
 ANTHROPIC_API_KEY=<your-api-key> \
+ANTHROPIC_MODEL=gpt-5.5 \
+ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-5.5 \
+ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-5.4 \
+ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-5.4-mini \
 claude
 ```
 
-Claude Code uses the native `/v1/messages` endpoint which auth2api passes through directly. Both `Authorization: Bearer` and `x-api-key` authentication headers are supported.
+Claude Code uses the native `/v1/messages` endpoint; auth2api translates Codex models through OpenAI Responses and preserves Anthropic-shaped streaming for Claude Code. Both `Authorization: Bearer` and `x-api-key` authentication headers are supported.
+
+Codex model guidance for Claude Code:
+
+- `gpt-5.5`: best default for full Claude Code sessions and complex tool-heavy work.
+- `gpt-5.4`: strong everyday coding model.
+- `gpt-5.4-mini`: fast/light tasks and background subagents.
+- `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and older models: useful for subagents and simple coding tasks, but weaker at Claude Code tool calling than GPT-5.4+; avoid them as the main interactive model for tool-heavy sessions.
 
 ## Multi-account
 
