@@ -189,6 +189,44 @@ test("anthropicToResponsesRequest: converts tool_use / tool_result blocks", () =
   assert.equal(out.tools[0].type, "function");
 });
 
+test("anthropicToResponsesRequest: converts tool_result image blocks to input_image output items", () => {
+  const out = anthropicToResponsesRequest({
+    model: "claude-sonnet-4-5",
+    max_tokens: 256,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tool_1",
+            content: [
+              { type: "text", text: "Read image metadata." },
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/jpeg",
+                  data: "abc123",
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.deepEqual(out.input[0], {
+    type: "function_call_output",
+    call_id: "tool_1",
+    output: [
+      { type: "input_text", text: "Read image metadata." },
+      { type: "input_image", image_url: "data:image/jpeg;base64,abc123" },
+    ],
+  });
+});
+
 test("anthropicToResponsesRequest: array system → instructions joined", () => {
   const out = anthropicToResponsesRequest({
     model: "claude-sonnet-4-5",

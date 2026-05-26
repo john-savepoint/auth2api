@@ -167,6 +167,33 @@ function extractText(content: unknown): string {
     .join("");
 }
 
+function imageSourceToDataUrl(source: any): string | null {
+  const data = source?.data;
+  if (typeof data !== "string" || !data) return null;
+  if (data.startsWith("data:")) return data;
+  const mime = source?.media_type || "image/png";
+  return `data:${mime};base64,${data}`;
+}
+
+function anthropicToolResultContentToResponsesOutput(content: unknown): any {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return JSON.stringify(content || "");
+
+  const items: any[] = [];
+  for (const part of content) {
+    if (part?.type === "text") {
+      items.push({ type: "input_text", text: part.text || "" });
+    } else if (part?.type === "image") {
+      const imageUrl = imageSourceToDataUrl(part.source);
+      if (imageUrl) items.push({ type: "input_image", image_url: imageUrl });
+    } else {
+      items.push({ type: "input_text", text: JSON.stringify(part) });
+    }
+  }
+
+  return items.length ? items : "";
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // 1. OpenAI Chat Completions request → OpenAI Responses request
 // ─────────────────────────────────────────────────────────────────────
@@ -181,7 +208,8 @@ export function chatToResponsesRequest(body: any): any {
   if (body.top_p !== undefined) out.top_p = body.top_p;
   const maxTokens = body.max_completion_tokens ?? body.max_tokens;
   if (maxTokens !== undefined) out.max_output_tokens = maxTokens;
-  if (body.user) out.user = body.user;
+  // Codex backend does not support the "user" parameter — strip it.
+  // if (body.user) out.user = body.user;
 
   if (body.reasoning_effort) {
     out.reasoning = { effort: body.reasoning_effort };
@@ -310,7 +338,8 @@ export function anthropicToResponsesRequest(body: any): any {
   if (body.max_tokens !== undefined) out.max_output_tokens = body.max_tokens;
   if (body.temperature !== undefined) out.temperature = body.temperature;
   if (body.top_p !== undefined) out.top_p = body.top_p;
-  if (body.metadata?.user_id) out.user = body.metadata.user_id;
+  // Codex backend does not support the "user" parameter — strip it.
+  // if (body.metadata?.user_id) out.user = body.metadata.user_id;
 
   // Anthropic `system` can be a string or [{type:"text", text}] array.
   if (body.system) {
@@ -368,14 +397,13 @@ export function anthropicToResponsesRequest(body: any): any {
           text: block.text || "",
         });
       } else if (block?.type === "image" && block.source?.data) {
-        const mime = block.source.media_type || "image/png";
-        const data = block.source.data;
-        textParts.push({
-          type: "input_image",
-          image_url: data.startsWith("data:")
-            ? data
-            : `data:${mime};base64,${data}`,
-        });
+        const imageUrl = imageSourceToDataUrl(block.source);
+        if (imageUrl) {
+          textParts.push({
+            type: "input_image",
+            image_url: imageUrl,
+          });
+        }
       } else if (block?.type === "tool_use") {
         // Flush any preceding text first to keep ordering.
         if (textParts.length) {
@@ -393,21 +421,10 @@ export function anthropicToResponsesRequest(body: any): any {
           inputItems.push({ role, content: [...textParts] });
           textParts.length = 0;
         }
-        const content = block.content;
-        const out =
-          typeof content === "string"
-            ? content
-            : Array.isArray(content)
-              ? content
-                  .map((c: any) =>
-                    c?.type === "text" ? c.text : JSON.stringify(c),
-                  )
-                  .join("")
-              : JSON.stringify(content || "");
         inputItems.push({
           type: "function_call_output",
           call_id: block.tool_use_id,
-          output: out,
+          output: anthropicToolResultContentToResponsesOutput(block.content),
         });
       }
     }
@@ -960,6 +977,7 @@ export function responsesSSEToAnthropic(
       if (r?.usage) {
         state.inputTokens = r.usage.input_tokens || 0;
         state.outputTokens = r.usage.output_tokens || 0;
+        state.cacheReadTokens = r.usage.input_tokens_details?.cached_tokens || 0;
       }
       if (r?.status === "incomplete" && state.stopReason === "end_turn") {
         state.stopReason = "max_tokens";
@@ -970,7 +988,12 @@ export function responsesSSEToAnthropic(
         sseEvent("message_delta", {
           type: "message_delta",
           delta: { stop_reason: state.stopReason, stop_sequence: null },
-          usage: { output_tokens: state.outputTokens },
+          usage: {
+            input_tokens: state.inputTokens,
+            output_tokens: state.outputTokens,
+            cache_read_input_tokens: state.cacheReadTokens,
+            cache_creation_input_tokens: 0,
+          },
         }),
       );
       out.push(sseEvent("message_stop", { type: "message_stop" }));
