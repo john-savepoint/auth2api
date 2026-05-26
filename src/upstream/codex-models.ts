@@ -3,7 +3,7 @@ import { AccountManager } from "../accounts/manager";
 const BASE_URL = "https://chatgpt.com/backend-api";
 const MODELS_PATH = "/codex/models";
 const CACHE_TTL_MS = 5 * 60 * 1000; // matches codex-rs/models-manager DEFAULT_MODEL_CACHE_TTL
-const CLIENT_VERSION = "auth2api/1.0.0";
+const CLIENT_VERSION = "0.133.0"; // semver format matching codex-rs Cargo.toml version
 
 // Static fallback used when no account is loaded or the upstream /codex/models
 // call fails. User-confirmed list of models currently accepted by the
@@ -14,6 +14,7 @@ const FALLBACK_MODELS = [
   "gpt-5.4",
   "gpt-5.4-mini",
   "gpt-5.3-codex",
+  "gpt-5.3-codex-spark",
   "gpt-5.2",
 ];
 
