@@ -17,6 +17,7 @@ import {
 } from "../upstream/translator";
 import { handleStreamingResponse, readSseEvents } from "../upstream/streaming";
 import { normalizeCodexResponsesBody } from "../upstream/codex-api";
+import { applyCodexRateLimitHeaders } from "../upstream/rate-limit-headers";
 import { normalizeCursorResponsesBody } from "../upstream/cursor-api";
 import {
   chatToResponsesRequest,
@@ -98,6 +99,9 @@ async function proxyCodexChatCompletions(args: {
         signal,
       }),
     success: async (upstream, account) => {
+      // Translate Codex rate-limit headers → Anthropic format for statusline
+      applyCodexRateLimitHeaders(upstream, resp);
+
       if (stream) {
         const state = makeResponsesToChatState(model);
         const result = await handleStreamingResponse(upstream, resp, {
@@ -228,6 +232,9 @@ async function proxyCodexResponses(args: {
         signal,
       }),
     success: async (upstream, account) => {
+      // Translate Codex rate-limit headers → Anthropic format for statusline
+      applyCodexRateLimitHeaders(upstream, resp);
+
       if (stream) {
         const result = await handleStreamingResponse(upstream, resp);
         if (result.completed) {

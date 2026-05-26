@@ -1,5 +1,5 @@
 import { Request } from "express";
-import { Config } from "../config";
+import { Config, isDebugLevel } from "../config";
 import { AvailableAccount } from "../accounts/manager";
 import { withTimeoutSignal } from "../utils/abort";
 
@@ -96,6 +96,41 @@ export interface CallCodexResponsesOptions {
   signal?: AbortSignal;
 }
 
+function diagnosticRequestId(request: Request): string {
+  const value = request.res?.locals?.requestId;
+  return typeof value === "string" ? value : "unknown";
+}
+
+function bodySizeBytes(body: unknown): number {
+  return Buffer.byteLength(JSON.stringify(body), "utf8");
+}
+
+function countInputItems(body: unknown): number | null {
+  if (!body || typeof body !== "object" || !("input" in body)) return null;
+  const input = body.input;
+  return Array.isArray(input) ? input.length : null;
+}
+
+function errorDetail(err: unknown): string {
+  if (err instanceof Error) {
+    const cause = err.cause;
+    if (cause && typeof cause === "object") {
+      const fields = cause as { code?: unknown; name?: unknown; message?: unknown };
+      const label =
+        typeof fields.code === "string"
+          ? fields.code
+          : typeof fields.name === "string"
+            ? fields.name
+            : "error";
+      const message =
+        typeof fields.message === "string" ? fields.message : String(cause);
+      return `${label}: ${message}`;
+    }
+    return err.message;
+  }
+  return String(err);
+}
+
 export async function callCodexResponses(
   options: CallCodexResponsesOptions,
 ): Promise<Response> {
@@ -106,20 +141,35 @@ export async function callCodexResponses(
   const timeoutMs = stream
     ? config.timeouts["stream-messages-ms"]
     : config.timeouts["messages-ms"];
+  const startedAt = Date.now();
+  const requestId = diagnosticRequestId(request);
+  const bodyBytes = bodySizeBytes(body);
+  const inputItems = countInputItems(body);
+
+  if (isDebugLevel(config.debug, "errors")) {
+    console.error(
+      `[codex] req=${requestId} upstream start model=${String(body?.model ?? "unknown")} stream=${stream} timeout_ms=${timeoutMs} body_bytes=${bodyBytes} input_items=${inputItems ?? "n/a"} account=${account.token.email}`,
+    );
+  }
 
   try {
-    return await fetch(url, {
+    const resp = await fetch(url, {
       method: "POST",
       headers: buildHeaders(account, stream, config),
       body: JSON.stringify(body),
       signal: withTimeoutSignal(timeoutMs, options.signal),
     });
-  } catch (err: any) {
-    // undici's "fetch failed" hides the real cause — surface it.
-    const cause = err?.cause;
-    const detail = cause
-      ? `${cause.code || cause.name || "error"}: ${cause.message || String(cause)}`
-      : err?.message || String(err);
+    if (isDebugLevel(config.debug, "errors")) {
+      console.error(
+        `[codex] req=${requestId} upstream headers status=${resp.status} elapsed_ms=${Date.now() - startedAt} content_type=${resp.headers.get("content-type") ?? "n/a"} cf_ray=${resp.headers.get("cf-ray") ?? "n/a"} retry_after=${resp.headers.get("retry-after") ?? "n/a"}`,
+      );
+    }
+    return resp;
+  } catch (err: unknown) {
+    const detail = errorDetail(err);
+    console.error(
+      `[codex] req=${requestId} upstream fetch failed elapsed_ms=${Date.now() - startedAt} detail=${detail}`,
+    );
     throw new Error(`codex upstream fetch failed: ${detail}`);
   }
 }

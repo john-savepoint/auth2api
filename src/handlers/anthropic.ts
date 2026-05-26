@@ -6,6 +6,7 @@ import { proxyWithRetry } from "../utils/http";
 import { resolveModel } from "../upstream/translator";
 import { handleStreamingResponse } from "../upstream/streaming";
 import { normalizeCodexResponsesBody } from "../upstream/codex-api";
+import { applyCodexRateLimitHeaders } from "../upstream/rate-limit-headers";
 import { tagStatsModel, tagStatsUsage } from "../stats/recorder";
 import {
   anthropicToResponsesRequest,
@@ -70,6 +71,9 @@ async function proxyCodexMessages(args: {
         signal,
       }),
     success: async (upstream, account) => {
+      // Translate Codex rate-limit headers → Anthropic format for statusline
+      applyCodexRateLimitHeaders(upstream, resp);
+
       if (stream) {
         const state = makeResponsesToAnthropicState(model);
         const result = await handleStreamingResponse(upstream, resp, {

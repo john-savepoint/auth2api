@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import express from "express";
 import { Config, isDebugLevel } from "./config";
 import { ProviderRegistry } from "./providers/registry";
@@ -49,13 +50,18 @@ export function createServer(
 
   app.use(express.json({ limit: config["body-limit"] }));
 
+  app.use((_req, res, next) => {
+    res.locals.requestId = crypto.randomUUID().slice(0, 8);
+    next();
+  });
+
   if (isDebugLevel(config.debug, "verbose")) {
     app.use((req, res, next) => {
       const startedAt = Date.now();
       console.error(`[debug] ${req.method} ${req.originalUrl} started`);
       res.on("finish", () => {
         console.error(
-          `[debug] ${req.method} ${req.originalUrl} -> ${res.statusCode} in ${Date.now() - startedAt}ms`,
+          `[debug] req=${res.locals.requestId} ${req.method} ${req.originalUrl} -> ${res.statusCode} in ${Date.now() - startedAt}ms`,
         );
       });
       next();
@@ -111,6 +117,7 @@ export function createServer(
       const ip = req.ip || req.socket.remoteAddress || "unknown";
       const ua = (req.headers["user-agent"] as string) || "";
       res.locals.stats = {
+        requestId: res.locals.requestId,
         apiKeyHash: hashApiKey(key),
         ip,
         ua,

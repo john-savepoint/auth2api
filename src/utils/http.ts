@@ -124,6 +124,8 @@ export async function proxyWithRetry(
   options: ProxyOptions,
 ): Promise<void> {
   const { manager } = options;
+  const requestId =
+    typeof resp.locals?.requestId === "string" ? resp.locals.requestId : "unknown";
   const maxRetries = options.maxRetries ?? MAX_RETRIES;
   let lastStatus = 500;
   let lastErrBody = "";
@@ -133,6 +135,9 @@ export async function proxyWithRetry(
   const requestController = new AbortController();
   const abortRequest = () => {
     if (!requestController.signal.aborted) {
+      if (isDebugLevel(config.debug, "errors")) {
+        console.error(`[proxy] req=${requestId} ${tag} client disconnected`);
+      }
       requestController.abort(new Error("client disconnected"));
     }
   };
@@ -140,6 +145,7 @@ export async function proxyWithRetry(
 
   try {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const attemptStartedAt = Date.now();
       const result = manager.getNextAccount();
       if (!result.account) {
         return accountUnavailable(resp, result, manager.provider);
@@ -165,7 +171,7 @@ export async function proxyWithRetry(
         manager.recordFailure(account.token.email, "network", err.message);
         if (isDebugLevel(config.debug, "errors")) {
           console.error(
-            `${tag} attempt ${attempt + 1} network failure: ${err.message}`,
+            `[proxy] req=${requestId} ${tag} attempt=${attempt + 1}/${maxRetries} network failure elapsed_ms=${Date.now() - attemptStartedAt}: ${err.message}`,
           );
         }
         if (attempt < maxRetries - 1) {
@@ -217,7 +223,7 @@ export async function proxyWithRetry(
         lastErrBody = await upstream.text();
         if (isDebugLevel(config.debug, "errors")) {
           console.error(
-            `${tag} attempt ${attempt + 1} failed (${lastStatus}): ${lastErrBody}`,
+            `[proxy] req=${requestId} ${tag} attempt=${attempt + 1}/${maxRetries} failed status=${lastStatus} elapsed_ms=${Date.now() - attemptStartedAt}: ${lastErrBody}`,
           );
         }
       } catch {
