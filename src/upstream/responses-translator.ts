@@ -125,6 +125,18 @@ export async function drainCodexResponsesSse(
         if (tc && typeof data.delta === "string") tc.args += data.delta;
         break;
       }
+      case "response.function_call_arguments.done": {
+        const ref = data.item_id || data.call_id;
+        const callId =
+          ref && toolCalls.has(ref)
+            ? ref
+            : ref
+              ? itemIdToCallId.get(ref)
+              : undefined;
+        const tc = callId ? toolCalls.get(callId) : null;
+        if (tc && typeof data.arguments === "string") tc.args = data.arguments;
+        break;
+      }
       case "response.completed":
         completedResponse = data.response || null;
         usage = data.response?.usage ?? usage;
@@ -334,6 +346,59 @@ export function chatToResponsesRequest(body: any): any {
 // 2. Anthropic Messages request → OpenAI Responses request
 // ─────────────────────────────────────────────────────────────────────
 
+const CODEX_PRUNED_AGENT_FIELDS = new Set([
+  "cwd",
+  "isolation",
+  "mode",
+  "name",
+  "team_name",
+]);
+
+function codexSafeToolSchema(tool: any): any {
+  const parameters = tool.input_schema || { type: "object", properties: {} };
+  if (tool.name !== "Agent" || !parameters?.properties) {
+    return parameters;
+  }
+
+  const properties = { ...parameters.properties };
+  for (const field of CODEX_PRUNED_AGENT_FIELDS) {
+    delete properties[field];
+  }
+  const required = Array.isArray(parameters.required)
+    ? parameters.required.filter((name: string) => !CODEX_PRUNED_AGENT_FIELDS.has(name))
+    : parameters.required;
+
+  return {
+    ...parameters,
+    properties,
+    ...(required ? { required } : {}),
+  };
+}
+
+function isAnthropicWebSearchTool(tool: any): boolean {
+  return tool?.type === "web_search_20250305" || tool?.name === "web_search";
+}
+
+function codexWebSearchTool(tool: any): any {
+  const out: any = { type: "web_search" };
+  if (Array.isArray(tool.allowed_domains) && tool.allowed_domains.length) {
+    out.filters = { allowed_domains: tool.allowed_domains };
+  } else if (Array.isArray(tool.blocked_domains) && tool.blocked_domains.length) {
+    out.filters = { blocked_domains: tool.blocked_domains };
+  }
+  return out;
+}
+
+function normalizeCodexToolInput(toolName: string, input: any): any {
+  if (toolName !== "Read" || input?.pages !== "") {
+    return input;
+  }
+
+  const normalized = { ...input };
+  delete normalized.pages;
+  return normalized;
+}
+
 export function anthropicToResponsesRequest(body: any): any {
   const out: any = {
     model: body.model,
@@ -365,12 +430,15 @@ export function anthropicToResponsesRequest(body: any): any {
 
   // tools (Anthropic) → tools (Responses)
   if (Array.isArray(body.tools)) {
-    out.tools = body.tools.map((t: any) => ({
-      type: "function",
-      name: t.name,
-      description: t.description,
-      parameters: t.input_schema || { type: "object", properties: {} },
-    }));
+    out.tools = body.tools.map((t: any) => {
+      if (isAnthropicWebSearchTool(t)) return codexWebSearchTool(t);
+      return {
+        type: "function",
+        name: t.name,
+        description: t.description,
+        parameters: codexSafeToolSchema(t),
+      };
+    });
   }
   if (body.tool_choice) {
     if (body.tool_choice.type === "auto") out.tool_choice = "auto";
@@ -378,7 +446,7 @@ export function anthropicToResponsesRequest(body: any): any {
     else if (body.tool_choice.type === "tool" && body.tool_choice.name) {
       out.tool_choice = {
         type: "function",
-        function: { name: body.tool_choice.name },
+        name: body.tool_choice.name,
       };
     }
   }
@@ -532,7 +600,7 @@ export function responsesToAnthropicMessage(resp: any, model: string): any {
         type: "tool_use",
         id: item.call_id || item.id,
         name: item.name,
-        input,
+        input: normalizeCodexToolInput(item.name, input),
       });
     }
   }
@@ -743,7 +811,7 @@ export interface ResponsesToAnthropicState {
   thinkingIndex: number;
   textOpen: boolean;
   textIndex: number;
-  toolBlocks: Map<string, { index: number; name: string; argsBuf: string }>;
+  toolBlocks: Map<string, { index: number; name: string; argsBuf: string; argsDeltaEmitted: boolean }>;
   // Maps codex's internal `fc_…` item id (used in
   // `function_call_arguments.delta` events) to the public `call_…`
   // id we key `toolBlocks` by. Kept separate so iterating
@@ -935,7 +1003,7 @@ export function responsesSSEToAnthropic(
           // `function_call_arguments.delta` events is recorded in
           // a sidecar map (`itemIdToCallId`) so the delta lookup
           // can resolve back to the same block.
-          const block = { index: idx, name: item.name, argsBuf: "" };
+          const block = { index: idx, name: item.name, argsBuf: "", argsDeltaEmitted: false };
           state.toolBlocks.set(item.call_id, block);
           if (item.id && item.id !== item.call_id) {
             state.itemIdToCallId.set(item.id, item.call_id);
@@ -968,11 +1036,37 @@ export function responsesSSEToAnthropic(
       const tool = callId ? state.toolBlocks.get(callId) : undefined;
       if (!tool || typeof data?.delta !== "string") return [];
       tool.argsBuf += data.delta;
+      if (tool.name === "Read") return [];
+      tool.argsDeltaEmitted = true;
       return [
         sseEvent("content_block_delta", {
           type: "content_block_delta",
           index: tool.index,
           delta: { type: "input_json_delta", partial_json: data.delta },
+        }),
+      ];
+    }
+
+    case "response.function_call_arguments.done": {
+      const ref = data?.item_id || data?.call_id;
+      if (!ref) return [];
+      const callId = state.toolBlocks.has(ref)
+        ? ref
+        : state.itemIdToCallId.get(ref);
+      const tool = callId ? state.toolBlocks.get(callId) : undefined;
+      if (!tool || typeof data?.arguments !== "string") return [];
+      tool.argsBuf = data.arguments;
+      if (tool.name === "Read") return [];
+      // GPT-5.5 streams args via deltas AND sends a done event.
+      // Spark sends done only (no deltas). If deltas were already
+      // emitted to the client, emitting the full args again would
+      // produce duplicated/corrupt JSON. Skip re-emission.
+      if (tool.argsDeltaEmitted) return [];
+      return [
+        sseEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: tool.index,
+          delta: { type: "input_json_delta", partial_json: tool.argsBuf },
         }),
       ];
     }
@@ -988,6 +1082,25 @@ export function responsesSSEToAnthropic(
         state.stopReason = "max_tokens";
       }
       const out = ensureMessageStart(state);
+      for (const tool of state.toolBlocks.values()) {
+        if (tool.name !== "Read") continue;
+        let input: any = {};
+        try {
+          input = JSON.parse(tool.argsBuf || "{}");
+        } catch {
+          input = {};
+        }
+        out.push(
+          sseEvent("content_block_delta", {
+            type: "content_block_delta",
+            index: tool.index,
+            delta: {
+              type: "input_json_delta",
+              partial_json: JSON.stringify(normalizeCodexToolInput(tool.name, input)),
+            },
+          }),
+        );
+      }
       out.push(...closeOpenBlocks(state));
       out.push(
         sseEvent("message_delta", {

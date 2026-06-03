@@ -141,6 +141,107 @@ test("anthropicToResponsesRequest: maps system, max_tokens, thinking", () => {
   assert.equal(out.input[0].role, "user");
 });
 
+test("anthropicToResponsesRequest: maps forced tool_choice to Codex Responses shape", () => {
+  const out = anthropicToResponsesRequest({
+    model: "gpt-5.5",
+    max_tokens: 256,
+    tool_choice: { type: "tool", name: "Agent" },
+    messages: [{ role: "user", content: "spawn subagent" }],
+    tools: [
+      {
+        name: "Agent",
+        description: "Launch a new agent",
+        input_schema: { type: "object", properties: {} },
+      },
+    ],
+  });
+
+  assert.deepEqual(out.tool_choice, { type: "function", name: "Agent" });
+});
+
+test("anthropicToResponsesRequest: maps Anthropic web_search server tool to Codex native web_search", () => {
+  const out = anthropicToResponsesRequest({
+    model: "gpt-5.5",
+    max_tokens: 256,
+    messages: [{ role: "user", content: "search OpenAI" }],
+    tools: [
+      {
+        type: "web_search_20250305",
+        name: "web_search",
+        allowed_domains: ["openai.com"],
+        blocked_domains: [],
+        max_uses: 8,
+      },
+    ],
+  });
+
+  assert.deepEqual(out.tools, [
+    {
+      type: "web_search",
+      filters: { allowed_domains: ["openai.com"] },
+    },
+  ]);
+});
+
+test("anthropicToResponsesRequest: prunes Agent-only runtime fields for Codex", () => {
+  const out = anthropicToResponsesRequest({
+    model: "gpt-5.5",
+    max_tokens: 256,
+    messages: [{ role: "user", content: "spawn subagent" }],
+    tools: [
+      {
+        name: "Agent",
+        description: "Launch a new agent",
+        input_schema: {
+          type: "object",
+          properties: {
+            description: { type: "string" },
+            prompt: { type: "string" },
+            subagent_type: { type: "string" },
+            cwd: { type: "string" },
+            isolation: { type: "string", enum: ["worktree"] },
+            mode: { type: "string", enum: ["default", "plan"] },
+            name: { type: "string" },
+            team_name: { type: "string" },
+          },
+          required: [
+            "description",
+            "prompt",
+            "subagent_type",
+            "cwd",
+            "isolation",
+            "mode",
+            "name",
+            "team_name",
+          ],
+        },
+      },
+      {
+        name: "Bash",
+        description: "Run shell command",
+        input_schema: {
+          type: "object",
+          properties: { command: { type: "string" } },
+          required: ["command"],
+        },
+      },
+    ],
+  });
+
+  const agentSchema = out.tools.find((tool: any) => tool.name === "Agent").parameters;
+  assert.equal(agentSchema.properties.cwd, undefined);
+  assert.equal(agentSchema.properties.isolation, undefined);
+  assert.equal(agentSchema.properties.mode, undefined);
+  assert.equal(agentSchema.properties.name, undefined);
+  assert.equal(agentSchema.properties.team_name, undefined);
+  assert.deepEqual(agentSchema.required, ["description", "prompt", "subagent_type"]);
+  assert.deepEqual(out.tools.find((tool: any) => tool.name === "Bash").parameters, {
+    type: "object",
+    properties: { command: { type: "string" } },
+    required: ["command"],
+  });
+});
+
 test("anthropicToResponsesRequest: converts tool_use / tool_result blocks", () => {
   const out = anthropicToResponsesRequest({
     model: "claude-sonnet-4-5",
@@ -297,6 +398,83 @@ test("responsesToChatCompletion: incomplete status maps to length finish_reason"
 });
 
 // ───────────────── responsesToAnthropicMessage (non-stream) ─────────────────
+
+test("responsesToAnthropicMessage: removes empty Read pages", () => {
+  const msg = responsesToAnthropicMessage(
+    {
+      status: "completed",
+      output: [
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "Read",
+          arguments:
+            '{"file_path":"/tmp/example.md","offset":0,"limit":2000,"pages":""}',
+        },
+      ],
+    },
+    "gpt-5.5",
+  );
+
+  assert.deepEqual(msg.content[0].input, {
+    file_path: "/tmp/example.md",
+    offset: 0,
+    limit: 2000,
+  });
+});
+
+test("responsesToAnthropicMessage: ignores Codex web_search_call and keeps final text", () => {
+  const msg = responsesToAnthropicMessage(
+    {
+      status: "completed",
+      output: [
+        {
+          id: "ws_1",
+          type: "web_search_call",
+          status: "completed",
+          action: { type: "search", query: "OpenAI", queries: ["OpenAI"] },
+        },
+        {
+          type: "message",
+          content: [
+            {
+              type: "output_text",
+              text: "Result: [OpenAI](https://openai.com/)",
+              annotations: [],
+            },
+          ],
+        },
+      ],
+      usage: { input_tokens: 10, output_tokens: 5 },
+    },
+    "gpt-5.5",
+  );
+
+  assert.deepEqual(msg.content, [
+    { type: "text", text: "Result: [OpenAI](https://openai.com/)" },
+  ]);
+  assert.equal(msg.stop_reason, "end_turn");
+});
+
+test("responsesToAnthropicMessage: keeps valid Read pages", () => {
+  const msg = responsesToAnthropicMessage(
+    {
+      status: "completed",
+      output: [
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "Read",
+          arguments:
+            '{"file_path":"/tmp/example.pdf","offset":0,"limit":2000,"pages":"1-3"}',
+        },
+      ],
+    },
+    "gpt-5.5",
+  );
+
+  assert.equal(msg.content[0].input.pages, "1-3");
+});
 
 test("responsesToAnthropicMessage: emits thinking + text + tool_use blocks in order", () => {
   const msg = responsesToAnthropicMessage(
@@ -464,6 +642,64 @@ test("responsesSSEToChat: tool_call arg deltas resolve when item_id differs from
   assert.match(all, /"finish_reason":"tool_calls"/);
 });
 
+test("responsesSSEToAnthropic: removes empty Read pages after buffering deltas", () => {
+  const state = makeResponsesToAnthropicState("gpt-5.5");
+  const out = [
+    ...responsesSSEToAnthropic("response.created", {}, state),
+    ...responsesSSEToAnthropic(
+      "response.output_item.added",
+      {
+        item: {
+          id: "fc_read",
+          call_id: "call_read",
+          type: "function_call",
+          name: "Read",
+        },
+      },
+      state,
+    ),
+    ...responsesSSEToAnthropic(
+      "response.function_call_arguments.delta",
+      { item_id: "fc_read", delta: '{"file_path":"/tmp/example.md","pages":""}' },
+      state,
+    ),
+    ...responsesSSEToAnthropic("response.completed", { response: { status: "completed" } }, state),
+  ];
+
+  const all = out.join("");
+  assert.match(all, /"partial_json":"\{\\"file_path\\":\\"\/tmp\/example\.md\\"\}"/);
+  assert.doesNotMatch(all, /pages/);
+  assert.match(all, /"stop_reason":"tool_use"/);
+});
+
+test("responsesSSEToAnthropic: keeps valid Read pages after buffering deltas", () => {
+  const state = makeResponsesToAnthropicState("gpt-5.5");
+  const out = [
+    ...responsesSSEToAnthropic("response.created", {}, state),
+    ...responsesSSEToAnthropic(
+      "response.output_item.added",
+      {
+        item: {
+          id: "fc_read",
+          call_id: "call_read",
+          type: "function_call",
+          name: "Read",
+        },
+      },
+      state,
+    ),
+    ...responsesSSEToAnthropic(
+      "response.function_call_arguments.delta",
+      { item_id: "fc_read", delta: '{"file_path":"/tmp/example.pdf","pages":"1-2"}' },
+      state,
+    ),
+    ...responsesSSEToAnthropic("response.completed", { response: { status: "completed" } }, state),
+  ];
+
+  const all = out.join("");
+  assert.match(all, /"pages\\":\\"1-2/);
+});
+
 test("responsesSSEToAnthropic: tool_use input_json_delta resolves when item_id differs from call_id (real codex shape)", () => {
   const state = makeResponsesToAnthropicState("claude-sonnet-4-5");
   const out = [
@@ -494,6 +730,57 @@ test("responsesSSEToAnthropic: tool_use input_json_delta resolves when item_id d
   const all = out.join("");
   assert.match(all, /"content_block":\{"type":"tool_use","id":"call_xyz","name":"get_weather"/);
   assert.match(all, /"type":"input_json_delta","partial_json":"\{\\"city\\":\\"Tokyo\\"\}"/);
+  assert.match(all, /"stop_reason":"tool_use"/);
+});
+
+test("responsesSSEToAnthropic: tool_use input_json_delta handles done-only arguments", () => {
+  const state = makeResponsesToAnthropicState("gpt-5.3-codex-spark");
+  const out = [
+    ...responsesSSEToAnthropic("response.created", {}, state),
+    ...responsesSSEToAnthropic(
+      "response.output_item.added",
+      {
+        item: {
+          id: "fc_bash",
+          call_id: "call_bash",
+          type: "function_call",
+          name: "Bash",
+          arguments: "",
+        },
+      },
+      state,
+    ),
+    ...responsesSSEToAnthropic(
+      "response.function_call_arguments.done",
+      {
+        item_id: "fc_bash",
+        arguments: '{"command":"pwd","description":"Get current working directory"}',
+      },
+      state,
+    ),
+    ...responsesSSEToAnthropic(
+      "response.output_item.done",
+      {
+        item: {
+          id: "fc_bash",
+          call_id: "call_bash",
+          type: "function_call",
+          name: "Bash",
+          arguments: '{"command":"pwd","description":"Get current working directory"}',
+        },
+      },
+      state,
+    ),
+    ...responsesSSEToAnthropic(
+      "response.completed",
+      { response: { status: "completed" } },
+      state,
+    ),
+  ];
+
+  const all = out.join("");
+  assert.match(all, /"content_block":\{"type":"tool_use","id":"call_bash","name":"Bash"/);
+  assert.match(all, /"partial_json":"\{\\"command\\":\\"pwd\\",\\"description\\":\\"Get current working directory\\"\}"/);
   assert.match(all, /"stop_reason":"tool_use"/);
 });
 
