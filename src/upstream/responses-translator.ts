@@ -136,6 +136,11 @@ export async function drainCodexResponsesSse(
     }
   }
 
+  if (!completedResponse && !upstreamError) {
+    upstreamError = "Upstream stream ended before response.completed";
+    status = "incomplete";
+  }
+
   return {
     textOut,
     reasoningOut,

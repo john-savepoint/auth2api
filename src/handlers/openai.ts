@@ -27,7 +27,7 @@ import {
   drainCodexResponsesSse,
 } from "../upstream/responses-translator";
 
-function openaiErrorBody(status: number, body: string): any {
+function openaiErrorBody(_status: number, body: string): any {
   try {
     const parsed = JSON.parse(body);
     // Codex backend uses { detail: "..." }; Anthropic uses { error: {...} };
@@ -105,6 +105,7 @@ async function proxyCodexChatCompletions(args: {
       if (stream) {
         const state = makeResponsesToChatState(model);
         const result = await handleStreamingResponse(upstream, resp, {
+          terminalEvent: "response.completed",
           onEvent: (event, data) => responsesSSEToChat(event, data, state),
         });
         if (result.completed) {
@@ -124,10 +125,17 @@ async function proxyCodexChatCompletions(args: {
       // drain helper so the trailing-buffer/decoder-flush bug stays
       // fixed in lockstep with the messages and responses paths.
       const drained = await drainCodexResponsesSse(upstream);
-      const { textOut, reasoningOut, toolCalls, upstreamError, status, usage } =
-        drained;
+      const {
+        textOut,
+        reasoningOut,
+        toolCalls,
+        completedResponse,
+        upstreamError,
+        status,
+        usage,
+      } = drained;
 
-      if (upstreamError && !textOut && !reasoningOut && toolCalls.size === 0) {
+      if (upstreamError && !completedResponse) {
         if (!resp.headersSent) {
           resp.status(502).json({
             error: { message: upstreamError, type: "upstream_error" },

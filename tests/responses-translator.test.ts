@@ -707,6 +707,19 @@ test("drainCodexResponsesSse: captures the final response.completed even without
   assert.equal(drained.completedResponse?.status, "completed");
 });
 
+test("drainCodexResponsesSse: treats missing response.completed as upstream error", async () => {
+  const resp = makeStreamingResponse([
+    'event: response.output_text.delta\ndata: {"delta":"Need write file."}\n\n',
+  ]);
+
+  const drained = await drainCodexResponsesSse(resp);
+
+  assert.equal(drained.textOut, "Need write file.");
+  assert.equal(drained.completedResponse, null);
+  assert.equal(drained.status, "incomplete");
+  assert.equal(drained.upstreamError, "Upstream stream ended before response.completed");
+});
+
 test("drainCodexResponsesSse: aggregates reasoning and tool-call deltas", async () => {
   const resp = makeStreamingResponse([
     'event: response.reasoning_summary_text.delta\ndata: {"delta":"think "}\n\n',

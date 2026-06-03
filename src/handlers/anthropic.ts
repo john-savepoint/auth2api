@@ -77,6 +77,7 @@ async function proxyCodexMessages(args: {
       if (stream) {
         const state = makeResponsesToAnthropicState(model);
         const result = await handleStreamingResponse(upstream, resp, {
+          terminalEvent: "response.completed",
           onEvent: (event, data) => responsesSSEToAnthropic(event, data, state),
         });
         if (result.completed) {
@@ -97,10 +98,17 @@ async function proxyCodexMessages(args: {
       // flush handling stays in sync with the chat completions and
       // responses paths.
       const drained = await drainCodexResponsesSse(upstream);
-      const { textOut, reasoningOut, toolCalls, upstreamError, status, usage } =
-        drained;
+      const {
+        textOut,
+        reasoningOut,
+        toolCalls,
+        completedResponse,
+        upstreamError,
+        status,
+        usage,
+      } = drained;
 
-      if (upstreamError && !textOut && !reasoningOut && toolCalls.size === 0) {
+      if (upstreamError && !completedResponse) {
         if (!resp.headersSent) {
           resp.status(502).json({
             error: { message: upstreamError, type: "upstream_error" },

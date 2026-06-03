@@ -88,6 +88,14 @@ export type SSEEventHandler = (
 
 export interface StreamOptions {
   onEvent?: SSEEventHandler;
+  /**
+   * Optional upstream terminal SSE event required for a transformed stream
+   * to count as complete. Used for OpenAI Responses → Anthropic transforms:
+   * if upstream closes after deltas but before response.completed, Claude Code
+   * must see an explicit failure instead of a quiet partial assistant turn.
+   */
+  terminalEvent?: string;
+  onMissingTerminalEvent?: () => string[];
 }
 
 export interface StreamResult {
@@ -153,6 +161,7 @@ export async function handleStreamingResponse(
   let currentEvent = "";
   let clientDisconnected = false;
   let completed = false;
+  let sawTerminalEvent = !options?.terminalEvent;
 
   const onClose = () => {
     clientDisconnected = true;
@@ -206,6 +215,9 @@ export async function handleStreamingResponse(
           if (!payload) continue;
           try {
             const data = JSON.parse(payload);
+            if (options?.terminalEvent && currentEvent === options.terminalEvent) {
+              sawTerminalEvent = true;
+            }
             extractUsageFromSSE(currentEvent, data, usage);
             if (options?.onEvent) {
               const chunks = options.onEvent(currentEvent, data, usage);
@@ -219,7 +231,19 @@ export async function handleStreamingResponse(
         }
       }
     }
-    completed = !clientDisconnected;
+    completed = !clientDisconnected && sawTerminalEvent;
+    if (!clientDisconnected && !sawTerminalEvent) {
+      const chunks = options?.onMissingTerminalEvent?.() ?? [
+        `event: error\ndata: ${JSON.stringify({
+          type: "error",
+          error: {
+            type: "upstream_error",
+            message: `Upstream stream ended before ${options?.terminalEvent}`,
+          },
+        })}\n\n`,
+      ];
+      for (const c of chunks) resp.write(c);
+    }
   } catch (err) {
     if (!clientDisconnected) console.error("Stream error:", err);
   } finally {

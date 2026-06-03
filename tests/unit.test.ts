@@ -248,6 +248,43 @@ test("handleStreamingResponse extracts usage from final un-terminated event in p
   assert.equal(result.usage.outputTokens, 5);
 });
 
+
+test("handleStreamingResponse marks transformed stream incomplete when terminal event is missing", async () => {
+  const encoder = new TextEncoder();
+  const upstream = new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'event: response.output_text.delta\ndata: {"delta":"Need write file."}\n\n',
+          ),
+        );
+        controller.close();
+      },
+    }),
+  );
+
+  const resp = makeMockResponse();
+  const result = await handleStreamingResponse(upstream, resp, {
+    terminalEvent: "response.completed",
+    onMissingTerminalEvent: () => [
+      'event: error\ndata: {"type":"error","error":{"type":"upstream_error","message":"Upstream stream ended before response.completed"}}\n\n',
+    ],
+    onEvent: (event, data) => {
+      if (event === "response.output_text.delta") {
+        return [`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: data.delta } })}\n\n`];
+      }
+      return [];
+    },
+  });
+
+  const written = resp.chunks.map((c: any) => String(c)).join("");
+  assert.match(written, /Need write file/);
+  assert.match(written, /Upstream stream ended before response\.completed/);
+  assert.equal(result.completed, false);
+});
+
+
 test("proxyWithRetry stops retry backoff when client disconnects", async () => {
   const resp = makeMockResponse();
   const account: any = {
